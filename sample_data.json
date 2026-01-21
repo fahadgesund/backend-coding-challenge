@@ -1,0 +1,37 @@
+[
+  {
+    "name": "David Thompson",
+    "email": "david.thompson@example.com",
+    "age": 34,
+    "department": "Engineering",
+    "city": "San Diego"
+  },
+  {
+    "name": "Sarah Connor",
+    "email": "sarah.connor@example.com",
+    "age": 29,
+    "department": "Security",
+    "city": "Phoenix"
+  },
+  {
+    "name": "Michael Scott",
+    "email": "michael.scott@example.com",
+    "age": 42,
+    "department": "Management",
+    "city": "Scranton"
+  },
+  {
+    "name": "Pam Beesly",
+    "email": "pam.beesly@example.com",
+    "age": 28,
+    "department": "Reception",
+    "city": "Scranton"
+  },
+  {
+    "name": "Jim Halpert",
+    "email": "jim.halpert@example.com",
+    "age": 30,
+    "department": "Sales",
+    "city": "Scranton"
+  }
+]
