@@ -2,7 +2,7 @@
 Data Import & Processing API
 
 A FastAPI application for importing and processing CSV/JSON data files.
-Handles bulk data imports, validation, and provides query endpoints.
+Handles bulk data imports, validation, and provides query endpoints with embeddings.
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
@@ -17,8 +17,22 @@ import sqlite3
 import hashlib
 import time
 import os
+import numpy as np
 
 app = FastAPI(title="Data Import API")
+
+# Simple embedding model - loads synchronously on startup (slow!)
+try:
+    from sentence_transformers import SentenceTransformer
+    print("Loading embedding model... (this takes time)")
+    embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    print("✓ Embedding model loaded")
+    EMBEDDINGS_ENABLED = True
+except ImportError:
+    print("⚠ sentence-transformers not installed. Embeddings disabled.")
+    print("  Install with: pip install sentence-transformers")
+    embedding_model = None
+    EMBEDDINGS_ENABLED = False
 
 # Database connection - not using connection pooling
 DB_PATH = "data_imports.db"
@@ -59,6 +73,7 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             import_id INTEGER NOT NULL,
             data TEXT NOT NULL,
+            embedding TEXT,
             status TEXT NOT NULL,
             error_message TEXT,
             created_at TEXT NOT NULL,
@@ -88,12 +103,14 @@ class RecordQuery(BaseModel):
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
     """
-    Upload a CSV or JSON file for processing.
+    Upload a CSV or JSON file for processing with embedding generation.
     
     Issues in this endpoint:
     - Reads entire file into memory
     - No file size limits
     - Processes synchronously (blocks the request)
+    - Embedding generation runs synchronously (VERY SLOW)
+    - No batching for embeddings
     - No proper error handling for malformed files
     - No transaction handling
     """
@@ -147,10 +164,14 @@ async def upload_file(file: UploadFile = File(...)):
                 # Validate record
                 validated = validate_record(record)
                 
+                # Generate embedding synchronously - BLOCKS THE ENTIRE API!
+                # This is the main performance bottleneck
+                embedding = generate_embedding(validated)
+                
                 # Store in database - individual inserts, no batching
                 cursor.execute(
-                    "INSERT INTO records (import_id, data, status, created_at) VALUES (?, ?, ?, ?)",
-                    (import_id, json.dumps(validated), "valid", datetime.now().isoformat())
+                    "INSERT INTO records (import_id, data, embedding, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (import_id, json.dumps(validated), embedding, "valid", datetime.now().isoformat())
                 )
                 conn.commit()  # Committing after each insert - very slow
                 
@@ -163,8 +184,8 @@ async def upload_file(file: UploadFile = File(...)):
             except Exception as e:
                 # Store failed record but don't stop processing
                 cursor.execute(
-                    "INSERT INTO records (import_id, data, status, error_message, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (import_id, json.dumps(record), "failed", str(e), datetime.now().isoformat())
+                    "INSERT INTO records (import_id, data, embedding, status, error_message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (import_id, json.dumps(record), None, "failed", str(e), datetime.now().isoformat())
                 )
                 conn.commit()
                 failed += 1
@@ -224,6 +245,39 @@ def process_json(content: bytes) -> List[Dict]:
         return data
     else:
         return [data]
+
+
+def generate_embedding(record: Dict) -> Optional[str]:
+    """
+    Generate embedding for a record.
+    
+    Issues:
+    - Runs synchronously (blocks processing)
+    - Generates embeddings one at a time (no batching)
+    - CPU/GPU intensive operation in request handler
+    - No caching or optimization
+    """
+    if not EMBEDDINGS_ENABLED:
+        return None
+    
+    try:
+        # Create text representation of record
+        text_parts = []
+        for key, value in record.items():
+            if value and str(value).strip():
+                text_parts.append(f"{key}: {value}")
+        
+        text = " | ".join(text_parts)
+        
+        # Generate embedding - BLOCKS EVERYTHING!
+        # This is CPU/GPU intensive and takes 50-200ms per record
+        embedding_vector = embedding_model.encode(text)
+        
+        # Convert to JSON string for storage
+        return json.dumps(embedding_vector.tolist())
+    except Exception as e:
+        # Silent failure - just skip embedding
+        return None
 
 
 def validate_record(record: Dict) -> Dict:
@@ -477,8 +531,11 @@ if __name__ == "__main__":
     import uvicorn
     print("Starting Data Import API...")
     print("API Documentation: http://localhost:8000/docs")
+    print(f"\nEmbeddings: {'✓ Enabled' if EMBEDDINGS_ENABLED else '✗ Disabled'}")
     print("\nKnown Issues:")
     print("- Synchronous file processing blocks the API")
+    print("- Embedding generation runs synchronously (VERY SLOW)")
+    print("- No batching for embeddings")
     print("- No proper async handling")
     print("- Memory leaks in cache")
     print("- N+1 query patterns")

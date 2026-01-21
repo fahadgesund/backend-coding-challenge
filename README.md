@@ -4,15 +4,16 @@ A FastAPI-based data import system for processing CSV and JSON files. This proje
 
 ## Overview
 
-This API allows users to upload CSV/JSON files containing user data, processes the records with validation, and stores them in a SQLite database. It provides endpoints for querying imports, searching records, and viewing statistics.
+This API allows users to upload CSV/JSON files containing user data, processes the records with validation, generates embeddings for semantic search, and stores them in a SQLite database. It provides endpoints for querying imports, searching records, and viewing statistics.
 
 ## What This System Does
 
 1. **File Upload**: Accepts CSV or JSON files via HTTP upload
 2. **Data Processing**: Parses and validates records from uploaded files
-3. **Storage**: Persists imports and records in SQLite database
-4. **Querying**: Provides endpoints to search and retrieve processed data
-5. **Statistics**: Shows aggregate statistics about imports and records
+3. **Embedding Generation**: Generates vector embeddings for each record using sentence-transformers
+4. **Storage**: Persists imports, records, and embeddings in SQLite database
+5. **Querying**: Provides endpoints to search and retrieve processed data
+6. **Statistics**: Shows aggregate statistics about imports and records
 
 ## Quick Start
 
@@ -67,6 +68,7 @@ curl http://localhost:8000/api/stats
 - **CSV File Upload**: Upload CSV files with user data (name, email, age)
 - **JSON File Upload**: Upload JSON arrays or single objects
 - **Data Validation**: Basic email and age validation
+- **Embedding Generation**: Automatic vector embedding generation for each record using sentence-transformers
 - **Duplicate Detection**: Checks file hash to prevent duplicate imports
 - **Status Tracking**: Tracks processing status of each import
 - **Record Search**: Filter records by import_id and status
@@ -109,66 +111,75 @@ This codebase contains several **intentional** design and implementation issues 
 
 ### Performance Issues
 
-1. **Synchronous File Processing**
+1. **Synchronous Embedding Generation (CRITICAL)**
+   - Embeddings generated synchronously during upload
+   - Each record takes 50-200ms to generate embedding
+   - 100 records = 5-20 seconds of blocking
+   - No batching for embedding generation
+   - **Impact**: API completely blocked during uploads, extremely slow processing
+
+2. **Synchronous File Processing**
    - Files are processed synchronously in the upload endpoint
    - Large files block the entire API during processing
    - No background task processing
    - **Impact**: API becomes unresponsive during uploads
 
-2. **No Batching**
+3. **No Batching**
    - Records inserted one-by-one with individual commits
    - Each insert is a separate database transaction
+   - Embeddings generated one-by-one (not batched)
    - **Impact**: Very slow for large files (1000+ records)
 
-3. **N+1 Query Problem**
+4. **N+1 Query Problem**
    - `/api/imports` endpoint fetches record counts individually
    - One query per import instead of a single JOIN
    - **Impact**: Slow when many imports exist
 
-4. **No Connection Pooling**
+5. **No Connection Pooling**
    - Creates new database connection for each request
    - Connections not reused
    - **Impact**: Resource waste and slower queries
 
-5. **Memory Leaks**
+6. **Memory Leaks**
    - `processed_cache` dictionary grows indefinitely
    - Never cleaned up even after import deletion
    - **Impact**: Memory usage grows over time
 
 ### Design Issues
 
-6. **No Async/Await Usage**
+7. **No Async/Await Usage**
    - File reading is async but processing is synchronous
+   - Embedding generation is synchronous (should be async)
    - Doesn't leverage FastAPI's async capabilities
    - Blocks the event loop
 
-7. **Poor Error Handling**
+8. **Poor Error Handling**
    - Generic exception catching loses context
-   - Silent failures in validation
+   - Silent failures in validation and embedding generation
    - No proper logging
 
-8. **No Transaction Management**
+9. **No Transaction Management**
    - Delete operation not wrapped in transaction
    - Can leave orphaned records if import delete fails
    - Data consistency issues
 
-9. **SQL Injection Vulnerability**
-   - `/api/records/search` uses string formatting for LIMIT clause
-   - **Security risk** if exposed to untrusted input
+10. **SQL Injection Vulnerability**
+    - `/api/records/search` uses string formatting for LIMIT clause
+    - **Security risk** if exposed to untrusted input
 
-10. **No Pagination**
+11. **No Pagination**
     - `/api/imports/{id}` returns ALL records
     - Can exhaust memory with large imports
     - No limit on result set size
 
 ### Data Validation Issues
 
-11. **Weak Validation**
+12. **Weak Validation**
     - Email validation only checks for '@' character
     - Silent data coercion (age defaults to 0)
     - No schema enforcement
 
-12. **Race Condition**
+13. **Race Condition**
     - Duplicate file check not atomic
     - Multiple uploads of same file can race
     - Can create duplicate imports
@@ -178,7 +189,9 @@ This codebase contains several **intentional** design and implementation issues 
 During a live coding session, candidates should identify:
 
 ### Critical (Must Find)
-- ⚠️ Synchronous processing blocking the API
+- ⚠️ **Synchronous embedding generation** - The #1 performance bottleneck
+- ⚠️ Synchronous file processing blocking the API
+- ⚠️ No batching for embeddings (generated one-by-one)
 - ⚠️ No database transaction handling
 - ⚠️ Memory leak in processed_cache
 - ⚠️ Individual commits per record (no batching)
@@ -199,21 +212,26 @@ During a live coding session, candidates should identify:
 
 Candidates might propose:
 
-1. **Use Background Tasks**: Process files asynchronously using `BackgroundTasks`
-2. **Batch Inserts**: Use `executemany()` for bulk inserts
-3. **Add Transactions**: Wrap operations in database transactions
-4. **Connection Pooling**: Use SQLAlchemy or connection pool
-5. **Pagination**: Add offset/limit to endpoints
-6. **Fix N+1**: Use JOINs or batch queries
-7. **Proper Async**: Make processing truly asynchronous
-8. **Cache Cleanup**: Implement TTL or size limits on cache
-9. **Parameterized Queries**: Fix SQL injection
-10. **Better Validation**: Use Pydantic models for data validation
+1. **Async Embedding Generation**: Move embedding generation to background task with batching
+2. **Use Background Tasks**: Process files asynchronously using `BackgroundTasks`
+3. **Batch Embeddings**: Generate embeddings in batches (10-50 at a time) instead of one-by-one
+4. **Batch Inserts**: Use `executemany()` for bulk inserts
+5. **Add Transactions**: Wrap operations in database transactions
+6. **Connection Pooling**: Use SQLAlchemy or connection pool
+7. **Pagination**: Add offset/limit to endpoints
+8. **Fix N+1**: Use JOINs or batch queries
+9. **Proper Async**: Make processing truly asynchronous
+10. **Cache Cleanup**: Implement TTL or size limits on cache
+11. **Parameterized Queries**: Fix SQL injection
+12. **Better Validation**: Use Pydantic models for data validation
 
 ## Live Coding Exercise Ideas
 
-### Task 1: Fix Synchronous Processing
-"The API is slow when uploading files. Make file processing asynchronous using FastAPI's BackgroundTasks."
+### Task 1: Fix Synchronous Embedding Generation (PRIMARY TASK)
+**Objective**: "The API becomes completely unresponsive when uploading files with 50+ records. The bottleneck is embedding generation. Refactor the ingestion flow so that:
+- The upload endpoint returns immediately
+- Embedding generation runs asynchronously in the background
+- Consider batching embeddings for better performance"
 
 ### Task 2: Add Database Transactions
 "The delete operation can leave orphaned records. Add proper transaction handling."
@@ -248,6 +266,7 @@ CREATE TABLE records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     import_id INTEGER NOT NULL,
     data TEXT NOT NULL,
+    embedding TEXT,
     status TEXT NOT NULL,
     error_message TEXT,
     created_at TEXT NOT NULL,
@@ -261,6 +280,8 @@ CREATE TABLE records (
 - **SQLite**: Lightweight database
 - **Pydantic**: Data validation
 - **Uvicorn**: ASGI server
+- **sentence-transformers**: Embedding generation (all-MiniLM-L6-v2 model)
+- **PyTorch**: Deep learning framework for embeddings
 
 ## Project Structure
 
